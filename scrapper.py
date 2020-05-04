@@ -6,9 +6,12 @@ from requests import post
 from requests.exceptions import RequestException
 from contextlib import closing
 from bs4 import BeautifulSoup
+import datetime
+import json
 
 app = Flask(__name__)
 api = Api(app)
+    
 
 def get_company_url(code:str)->str:
     """
@@ -19,7 +22,7 @@ def get_company_url(code:str)->str:
         str -- ural of desired company
     """
     params = {'name':'', 'city':0,'word':'','code':code,'catUrlKey':'','ok':'','resetFilter':0,'order':1}
-    url = "https://rekvizitai.vz.lt/en/companies/1"
+    url = "https://rekvizitai.vz.lt/imones/1"
     try:
         with closing(post(url, params)) as response:
             if response.status_code == 200:
@@ -48,20 +51,68 @@ def get_url_content(url:str):
     except RequestException as e:
         raise RequestException(f'Error during requests to {url} : {str(e)}')
 
-def parse_content(raw_html, element_tag='table'):
-    html_soup = BeautifulSoup(raw_html, 'html.parser')
+class CompanyModel():
+
+    name:str
+    code:str
+    address:str
+    website:str
+    employees:int
+    sodracode:int
+    averagesalary:float
+    turnoveryear:int
+    turnoverrange:str
+    cardate:str
+    cars:int
+    regaddress:str
+    regdate: datetime
+    legalform:str
+    status:str
+    industry:str
+
+    def toJSON(self):
+        return json.dumps(self, default=lambda o: o.__dict__, sort_keys=True, indent=4)
+
+def clean_string(text:str)->str:
+    return text.get_text().replace('\r', '').replace('\t', '').replace('\n','')
+
+def parse_content(raw_html):
+
+    company = CompanyModel()
+
+    html_soup1 = BeautifulSoup(raw_html[0], 'html.parser')
+    table=html_soup1.find('div',class_='info')
+    html_soup2 = BeautifulSoup(raw_html[1], 'html.parser')
+    table2=html_soup2.find('div',class_='info')
     
-    table=html_soup.find('div',class_='info')
-    tr_list=table.find_all('tr') 
-    tr=table.find_all('tr') 
 
-    values = {'Company name':html_soup.find("div", class_="name floatLeft").find('h1').get_text()}
+    company.name = html_soup1.find("div", class_="name floatLeft").find('h1').get_text()
+    company.code = table.find("td", text="Įmonės kodas").find_next_sibling("td").text
+    company.address = table.find("td", text="Adresas").find_next_sibling("td").text
+    company.website = table.find("td", text="Tinklalapis").find_next_sibling("td").text if table.find("td", text="Tinklalapis") else None
+    company.employees = clean_string(table.find("td", text="Darbuotojai").find_next_sibling("td")).split(' ')[0] if table.find("td", text="Darbuotojai") else 0
+    company.sodracode = clean_string(table.find("td", text="SD draudėjo kodas").find_next_sibling("td")).split(' ') if table.find("td", text="SD draudėjo kodas") else 0
+    company.averagesalary = clean_string(table.find("td", text="Vidutinis atlyginimas").find_next_sibling("td")).split(" €")[0].replace(",", ".") if table.find("td", text="Vidutinis atlyginimas") else 0
+    company.turnoverrange = clean_string(table.find("td", text="Pardavimo pajamos").find_next_sibling("td")).split(": ")[1].split(" €")[0] if table.find("td", text="Pardavimo pajamos") else 0
+    company.turnoveryear = clean_string(table.find("td", text="Pardavimo pajamos").find_next_sibling("td")).split(": ")[0] if table.find("td", text="Pardavimo pajamos") else 0
+    company.cardate = clean_string(table.find("td", text="Transportas").find_next_sibling("td")).split(": ")[0] if table.find("td", text="Transportas") else 0
+    company.cars = clean_string(table.find("td", text="Transportas").find_next_sibling("td")).split(': ')[1].split(' ')[0] if table.find("td", text="Transportas") else 0
 
-    for item in tr_list:
-        td = item.find_all('td')
-        if td[len(td)-1].get_text() != '':
-            values[td[len(td)-2].get_text().strip().replace('\r', '').replace('\t', '').replace('\n', '', 1)] = td[len(td)-1].get_text().strip().replace('\r', '').replace('\t', '').replace('\n', '')
-    return values
+    company.regaddress = clean_string(table2.find("td", text="Registracijos adresas").find_next_sibling("td")) if table2.find("td", text="Registracijos adresas") else 0
+    company.regdate = clean_string(table2.find("td", text="Įregistruotas").find_next_sibling("td")) if table2.find("td", text="Įregistruotas") else 0
+    company.legalform = clean_string(table2.find("td", text="Teisinė forma").find_next_sibling("td")) if table2.find("td", text="Teisinė forma") else 0
+    company.status = clean_string(table2.find("td", text="Teisinis statusas").find_next_sibling("td")) if table2.find("td", text="Teisinis statusas") else 0
+
+    industry = table2.find("td",  text="EVRK 2 red. veikla").find_next_sibling("td") if table2.find("td", text="EVRK 2 red. veikla") else None
+    for match in industry.find_all('span'):
+        match.replaceWith('')
+    company.industry = clean_string(industry)
+
+    return company
+
+
+
+
 
 class Company(Resource):
     def post(self):
@@ -80,12 +131,19 @@ class Company(Resource):
 
             url = get_company_url(json_data["code"])
 
-            raw_html = get_url_content(url)
-            if raw_html == None or len(raw_html) == 0:
-                return f"Company with code {json_data['code']} was not found", 400
+            url_list = []
+            html_list = []
+            url_list.append(url)
+            url_list.append(url+'juridinis-asmuo/')
 
-            result = parse_content(raw_html)
-                
+            for u in url_list:
+                raw_html = get_url_content(u)
+                if raw_html == None or len(raw_html) == 0:
+                    return f"Company with code {json_data['code']} was not found", 400
+                html_list.append(raw_html)
+
+            result = parse_content(html_list).toJSON()
+
             return result, 200
         except Exception as e:
             return e, 400
